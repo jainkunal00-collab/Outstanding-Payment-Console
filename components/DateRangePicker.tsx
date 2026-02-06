@@ -1,5 +1,6 @@
+
 import React, { useState } from 'react';
-import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Check, RotateCcw } from 'lucide-react';
 
 interface DateRangePickerProps {
     startDate: string;
@@ -61,6 +62,12 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({ startDate, end
         onClose();
     };
 
+    const handleClearSelection = () => {
+        setTempRange({ from: '', to: '' });
+        onChange({ from: '', to: '' });
+        onClose();
+    };
+
     const handlePreset = (preset: string) => {
         const now = new Date();
         let from = '';
@@ -103,7 +110,6 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({ startDate, end
         const from = tempRange.from;
         let to = tempRange.to;
         
-        // If selecting range (to is empty), visualize range to hoverDate
         if (from && !to && hoverDate) {
              const dTime = date.getTime();
              const fTime = new Date(from).getTime();
@@ -141,7 +147,6 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({ startDate, end
 
     return (
         <div className="absolute top-full left-0 mt-2 bg-white rounded-xl shadow-2xl border border-slate-200 z-50 flex flex-col md:flex-row overflow-hidden animate-scale-up origin-top-left w-[300px] md:w-[500px]">
-            {/* Sidebar Presets */}
             <div className="md:w-36 bg-slate-50 border-b md:border-b-0 md:border-r border-slate-100 p-2 flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-visible">
                 <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2 py-2 hidden md:block">Presets</span>
                 {[
@@ -152,17 +157,15 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({ startDate, end
                     { l: 'This Month', v: 'thisMonth' },
                     { l: 'Last Month', v: 'lastMonth' }
                 ].map(p => (
-                    <button 
-                        key={p.v} 
-                        onClick={() => handlePreset(p.v)}
-                        className="text-left px-3 py-2 text-xs font-bold text-slate-600 hover:bg-white hover:text-indigo-600 rounded-lg transition-colors border border-transparent hover:border-slate-200 whitespace-nowrap"
-                    >
-                        {p.l}
-                    </button>
+                    <button key={p.v} onClick={() => handlePreset(p.v)} className="text-left px-3 py-2 text-xs font-bold text-slate-600 hover:bg-white hover:text-indigo-600 rounded-lg transition-colors border border-transparent hover:border-slate-200 whitespace-nowrap">{p.l}</button>
                 ))}
+                <div className="mt-auto hidden md:block pt-4 border-t border-slate-200">
+                    <button onClick={handleClearSelection} className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                        <RotateCcw size={14} /> Reset
+                    </button>
+                </div>
             </div>
 
-            {/* Calendar Area */}
             <div className="flex-1 p-4">
                 <div className="flex items-center justify-between mb-4">
                     <button onClick={() => changeMonth(-1)} className="p-1 hover:bg-slate-100 rounded-full text-slate-500"><ChevronLeft size={20}/></button>
@@ -171,41 +174,25 @@ export const DateRangePicker: React.FC<DateRangePickerProps> = ({ startDate, end
                 </div>
 
                 <div className="grid grid-cols-7 mb-2">
-                    {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
-                        <div key={d} className="text-center text-[10px] font-bold text-slate-400 uppercase">{d}</div>
-                    ))}
+                    {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (<div key={d} className="text-center text-[10px] font-bold text-slate-400 uppercase">{d}</div>))}
                 </div>
 
                 <div className="grid grid-cols-7 gap-y-1">
                     {days.map((d, i) => {
                         if (!d) return <div key={i} className="h-8"></div>;
-                        return (
-                            <button 
-                                key={i} 
-                                onClick={() => handleDateClick(d)}
-                                onMouseEnter={() => setHoverDate(formatDate(d))}
-                                onMouseLeave={() => setHoverDate(null)}
-                                className={`h-8 w-full flex items-center justify-center text-xs transition-colors ${getDayClass(d)}`}
-                            >
-                                {d.getDate()}
-                            </button>
-                        );
+                        return (<button key={i} onClick={() => handleDateClick(d)} onMouseEnter={() => setHoverDate(formatDate(d))} onMouseLeave={() => setHoverDate(null)} className={`h-8 w-full flex items-center justify-center text-xs transition-colors ${getDayClass(d)}`}>{d.getDate()}</button>);
                     })}
                 </div>
 
                 <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between">
                     <div className="text-[10px] text-slate-500">
-                        {tempRange.from ? (
-                            <span className="font-mono font-bold text-indigo-600">
-                                {formatDisplay(tempRange.from)} {tempRange.to ? `→ ${formatDisplay(tempRange.to)}` : ''}
-                            </span>
-                        ) : 'Select range'}
+                        {tempRange.from ? (<span className="font-mono font-bold text-indigo-600">
+                                {formatDisplay(tempRange.from)} {tempRange.to ? `→ ${formatDisplay(tempRange.to)}` : '(older)'}
+                            </span>) : 'Select range'}
                     </div>
                     <div className="flex gap-2">
                         <button onClick={onClose} className="px-3 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg">Cancel</button>
-                        <button onClick={handleApply} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-1 shadow-sm">
-                            <Check size={14} /> Apply
-                        </button>
+                        <button onClick={handleApply} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-1 shadow-sm"><Check size={14} /> Apply</button>
                     </div>
                 </div>
             </div>

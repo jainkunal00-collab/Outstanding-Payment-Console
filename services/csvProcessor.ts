@@ -99,11 +99,6 @@ export const getCompanyNameFromBillNo = (billNo: string): string | null => {
 
 // Helper to re-scan processed data after a Prefix Update
 export const reapplyPrefixes = (parties: ProcessedParty[]): ProcessedParty[] => {
-    // Since getCompanyNameFromBillNo is called dynamically in UI components,
-    // we strictly don't *need* to change the party object structure unless
-    // we were caching company names on the bill object. 
-    // Currently, company name is derived on render.
-    // We just return a shallow copy to trigger React re-render.
     return parties.map(p => ({ ...p }));
 };
 
@@ -119,8 +114,6 @@ export const parsePrefixFile = (file: File): Promise<Record<string, string>> => 
         const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
         
         const map: Record<string, string> = {};
-        // Expecting Row 1 to be headers, data starts from Row 2
-        // Column 0 = Prefix, Column 1 = Company Name
         jsonData.slice(1).forEach(row => {
             if (row[0] && row[1]) {
                 const prefix = String(row[0]).trim();
@@ -213,7 +206,7 @@ const cleanCurrency = (val: any): number => {
 export const parseDate = (dateStr: string): number => {
     if (!dateStr) return 0;
     const d = new Date(dateStr);
-    if (!isNaN(d.getTime())) return d.getTime();
+    if (!isNaN(d.getTime())) return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
     const parts = dateStr.split(/[-\/\s]/);
     if (parts.length >= 3) {
         const day = parseInt(parts[0], 10);
@@ -317,7 +310,7 @@ const processRawData = (rows: RawCsvRow[]): ProcessedParty[] => {
   return parties;
 };
 
-// HELPER: Convert input YYYY-MM-DD to comparable timestamp
+// HELPER: Convert input YYYY-MM-DD to comparable timestamp at midnight
 const getFilterTimestamp = (dateStr: string) => {
     if (!dateStr) return null;
     const [y, m, d] = dateStr.split('-').map(Number);
@@ -345,10 +338,13 @@ const checkBillMatch = (b: BillDetail, filterCompanies: string[], filterMinDays:
         const fromTs = getFilterTimestamp(dateRange.from);
         const toTs = getFilterTimestamp(dateRange.to);
 
-        // Special Rule: If only one date is selected (from), treat it as "Up To" date (show older bills)
+        // Logic Rule: If only one date is selected, treat it as "Up To" date (show bills same as or older than selected)
         if (dateRange.from && !dateRange.to) {
-             // Only From selected -> Show Bills <= From (Up To logic)
+             // Only From selected -> Show Bills <= From (Older or Same Date)
              if (fromTs && bDate > fromTs) return false;
+        } else if (!dateRange.from && dateRange.to) {
+             // Only To selected -> Treat it similarly as an Up To date
+             if (toTs && bDate > toTs) return false;
         } else {
              // Standard Range: From <= Bill <= To
              if (fromTs && bDate < fromTs) return false;
@@ -375,19 +371,12 @@ export const downloadExcel = (parties: ProcessedParty[], filterCompanies: string
   let grandTotalCredit = 0;
 
   parties.forEach((p) => {
-    // Filter out bills marked as paid or dispute in session
-    // AND apply company/day filters if they exist
     const partyBills = p.bills.filter(b => checkBillMatch(b, filterCompanies, filterMinDays, dateRange));
-    
-    // Recalculate debit based on active filtered bills
     const activeDebit = round(partyBills.reduce((sum, b) => sum + b.billAmt, 0));
-    
-    // Accumulate Totals
     grandTotalDebit += activeDebit;
     grandTotalCredit += p.balanceCredit;
 
     let isFirstRowForParty = true;
-
     if (partyBills.length === 0) {
       const baseData = [
         partyCounter++,
@@ -402,7 +391,6 @@ export const downloadExcel = (parties: ProcessedParty[], filterCompanies: string
       for (let i = 0; i < partyBills.length; i += BILLS_PER_ROW) {
         const billChunk = partyBills.slice(i, i + BILLS_PER_ROW);
         let rowHasUnknownPrefix = false;
-
         const baseData = isFirstRowForParty ? [
           partyCounter++,
           p.partyName,
@@ -413,17 +401,13 @@ export const downloadExcel = (parties: ProcessedParty[], filterCompanies: string
 
         const billData = billChunk.flatMap(b => {
           const companyName = getCompanyNameFromBillNo(b.billNo);
-          if (!companyName && b.billNo) {
-            rowHasUnknownPrefix = true;
-          }
+          if (!companyName && b.billNo) rowHasUnknownPrefix = true;
           const isAdjusted = b.billAmt < b.originalBillAmt;
           const displayAmt = isAdjusted ? `${b.billAmt} (B)` : String(b.billAmt);
           return [b.billDate, companyName || b.billNo, displayAmt];
         });
 
-        while (billData.length < BILLS_PER_ROW * 3) {
-          billData.push("");
-        }
+        while (billData.length < BILLS_PER_ROW * 3) billData.push("");
         finalDataRows.push([...baseData, ...billData]);
         if (rowHasUnknownPrefix) rowsToHighlight.push(finalDataRows.length);
         isFirstRowForParty = false;
@@ -431,67 +415,42 @@ export const downloadExcel = (parties: ProcessedParty[], filterCompanies: string
     }
   });
 
-  // Append Grand Total Row
-  finalDataRows.push([
-    "", 
-    "GRAND TOTAL", 
-    grandTotalDebit > 0 ? round(grandTotalDebit) : "", 
-    grandTotalCredit > 0 ? -round(grandTotalCredit) : "", 
-    "", 
-    ...Array(BILLS_PER_ROW * 3).fill("")
-  ]);
+  finalDataRows.push(["", "GRAND TOTAL", grandTotalDebit > 0 ? round(grandTotalDebit) : "", grandTotalCredit > 0 ? -round(grandTotalCredit) : "", "", ...Array(BILLS_PER_ROW * 3).fill("")]);
 
   const wsData = [header, ...finalDataRows];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-
   const range = XLSX.utils.decode_range(ws['!ref'] || "A1");
   for (let R = 1; R <= range.e.r; ++R) {
     const isHighlightedRow = rowsToHighlight.includes(R);
     const isTotalRow = finalDataRows[R-1] && finalDataRows[R-1][1] === "GRAND TOTAL";
-    
     for (let C = 0; C <= range.e.c; ++C) {
         const cellRef = XLSX.utils.encode_cell({c: C, r: R});
         const cell = ws[cellRef];
         if (!cell) continue;
         if (!cell.s) cell.s = {};
-        
-        if (isHighlightedRow) {
-            cell.s.fill = { fgColor: { rgb: "FFFF00" }, patternType: "solid" };
-        }
-        
+        if (isHighlightedRow) cell.s.fill = { fgColor: { rgb: "FFFF00" }, patternType: "solid" };
         if (isTotalRow) {
             if (!cell.s.font) cell.s.font = {};
             cell.s.font.bold = true;
             cell.s.fill = { fgColor: { rgb: "EFEFEF" }, patternType: "solid" };
         }
-        
         if (typeof cell.v === 'string' && cell.v.includes("(B)")) {
             if (!cell.s.font) cell.s.font = {};
             cell.s.font.bold = true;
         }
     }
   }
-
   const wscols = [{ wch: 8 }, { wch: 30 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
-  for (let i = 0; i < BILLS_PER_ROW * 3; i++) {
-     wscols.push({ wch: (i + 1) % 3 === 0 ? 15 : 12 });
-  }
+  for (let i = 0; i < BILLS_PER_ROW * 3; i++) wscols.push({ wch: (i + 1) % 3 === 0 ? 15 : 12 });
   ws['!cols'] = wscols;
-
   XLSX.utils.book_append_sheet(wb, ws, "Processed Data");
   XLSX.writeFile(wb, "processed_outstanding_payment.xlsx");
 };
 
 export const downloadExcelCombined = (parties: ProcessedParty[], filterCompanies: string[] = [], filterMinDays: number | '' = '', dateRange?: {from: string, to: string}) => {
   const BILLS_PER_ROW = 4;
-  const header = [
-    "S No.", "Party Name", "Balance Debit", "Balance Credit", "Phone Number",
-    ...Array.from({ length: BILLS_PER_ROW }).flatMap((_, i) => [
-        `Bill Date ${i+1}`, `Bill No & Amt ${i+1}`
-    ])
-  ];
-
+  const header = ["S No.", "Party Name", "Balance Debit", "Balance Credit", "Phone Number", ...Array.from({ length: BILLS_PER_ROW }).flatMap((_, i) => [`Bill Date ${i+1}`, `Bill No & Amt ${i+1}`])];
   const rowsToHighlight: number[] = [];
   const finalDataRows: any[][] = [];
   let partyCounter = 1;
@@ -500,55 +459,26 @@ export const downloadExcelCombined = (parties: ProcessedParty[], filterCompanies
 
   parties.forEach((p) => {
     const partyBills = p.bills.filter(b => checkBillMatch(b, filterCompanies, filterMinDays, dateRange));
-
-    // Recalculate debit based on active bills
     const activeDebit = round(partyBills.reduce((sum, b) => sum + b.billAmt, 0));
-    
-    // Accumulate Totals
     grandTotalDebit += activeDebit;
     grandTotalCredit += p.balanceCredit;
 
     let isFirstRowForParty = true;
-
     if (partyBills.length === 0) {
-      const baseData = [
-        partyCounter++,
-        p.partyName,
-        activeDebit > 0 ? activeDebit : "",
-        p.balanceCredit > 0 ? -p.balanceCredit : "",
-        p.phoneNumber
-      ];
-      const emptyBills = Array(BILLS_PER_ROW * 2).fill("");
-      finalDataRows.push([...baseData, ...emptyBills]);
+      finalDataRows.push([partyCounter++, p.partyName, activeDebit > 0 ? activeDebit : "", p.balanceCredit > 0 ? -p.balanceCredit : "", p.phoneNumber, ...Array(BILLS_PER_ROW * 2).fill("")]);
     } else {
       for (let i = 0; i < partyBills.length; i += BILLS_PER_ROW) {
         const billChunk = partyBills.slice(i, i + BILLS_PER_ROW);
         let rowHasUnknownPrefix = false;
-
-        const baseData = isFirstRowForParty ? [
-          partyCounter++,
-          p.partyName,
-          activeDebit > 0 ? activeDebit : "",
-          p.balanceCredit > 0 ? -p.balanceCredit : "",
-          p.phoneNumber
-        ] : ["", "", "", "", ""];
-
+        const baseData = isFirstRowForParty ? [partyCounter++, p.partyName, activeDebit > 0 ? activeDebit : "", p.balanceCredit > 0 ? -p.balanceCredit : "", p.phoneNumber] : ["", "", "", "", ""];
         const billData = billChunk.flatMap(b => {
           const companyName = getCompanyNameFromBillNo(b.billNo);
-          if (!companyName && b.billNo) {
-            rowHasUnknownPrefix = true;
-          }
+          if (!companyName && b.billNo) rowHasUnknownPrefix = true;
           const isAdjusted = b.billAmt < b.originalBillAmt;
           const displayAmt = isAdjusted ? `${b.billAmt} (B)` : String(b.billAmt);
-          
-          // Separate Bill Date, combine No and Amt with 3 spaces as requested.
           return [b.billDate, `${companyName || b.billNo}   ${displayAmt}`];
         });
-
-        while (billData.length < BILLS_PER_ROW * 2) {
-          billData.push("");
-        }
-
+        while (billData.length < BILLS_PER_ROW * 2) billData.push("");
         finalDataRows.push([...baseData, ...billData]);
         if (rowHasUnknownPrefix) rowsToHighlight.push(finalDataRows.length);
         isFirstRowForParty = false;
@@ -556,55 +486,36 @@ export const downloadExcelCombined = (parties: ProcessedParty[], filterCompanies
     }
   });
 
-  // Append Grand Total Row
-  finalDataRows.push([
-    "", 
-    "GRAND TOTAL", 
-    grandTotalDebit > 0 ? round(grandTotalDebit) : "", 
-    grandTotalCredit > 0 ? -round(grandTotalCredit) : "", 
-    "", 
-    ...Array(BILLS_PER_ROW * 2).fill("")
-  ]);
-
+  finalDataRows.push(["", "GRAND TOTAL", grandTotalDebit > 0 ? round(grandTotalDebit) : "", grandTotalCredit > 0 ? -round(grandTotalCredit) : "", "", ...Array(BILLS_PER_ROW * 2).fill("")]);
   const wsData = [header, ...finalDataRows];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-
   const range = XLSX.utils.decode_range(ws['!ref'] || "A1");
   for (let R = 1; R <= range.e.r; ++R) {
     const isHighlightedRow = rowsToHighlight.includes(R);
     const isTotalRow = finalDataRows[R-1] && finalDataRows[R-1][1] === "GRAND TOTAL";
-
     for (let C = 0; C <= range.e.c; ++C) {
         const cellRef = XLSX.utils.encode_cell({c: C, r: R});
         const cell = ws[cellRef];
         if (!cell) continue;
         if (!cell.s) cell.s = {};
-        
-        if (isHighlightedRow) {
-            cell.s.fill = { fgColor: { rgb: "FFFF00" }, patternType: "solid" };
-        }
-
+        if (isHighlightedRow) cell.s.fill = { fgColor: { rgb: "FFFF00" }, patternType: "solid" };
         if (isTotalRow) {
             if (!cell.s.font) cell.s.font = {};
             cell.s.font.bold = true;
             cell.s.fill = { fgColor: { rgb: "EFEFEF" }, patternType: "solid" };
         }
-
         if (typeof cell.v === 'string' && cell.v.includes("(B)")) {
             if (!cell.s.font) cell.s.font = {};
             cell.s.font.bold = true;
         }
     }
   }
-
   const wscols = [{ wch: 8 }, { wch: 30 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
   for (let i = 0; i < BILLS_PER_ROW; i++) {
-    wscols.push({ wch: 12 }); // Date column
-    wscols.push({ wch: 35 }); // Combined No & Amt column
+    wscols.push({ wch: 12 }, { wch: 35 });
   }
   ws['!cols'] = wscols;
-
   XLSX.utils.book_append_sheet(wb, ws, "Combined Data");
   XLSX.writeFile(wb, "combined_bill_outstanding_report.xlsx");
 };
@@ -612,16 +523,7 @@ export const downloadExcelCombined = (parties: ProcessedParty[], filterCompanies
 export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames: string[], format: 'standard' | 'combined' = 'standard', minDays: number | '' = '', dateRange?: {from: string, to: string}) => {
   const BILLS_PER_ROW = 4;
   const isCombined = format === 'combined';
-  
-  const header = [
-    "S No.", "Party Name", "Total Debit (Selected Filter)", "Balance Credit", "Phone Number",
-    ...Array.from({ length: BILLS_PER_ROW }).flatMap((_, i) => 
-        isCombined 
-            ? [`Bill Date ${i+1}`, `Company & Amt ${i+1}`]
-            : [`Bill Date ${i+1}`, `Company ${i+1}`, `Bill Amt ${i+1}`]
-    )
-  ];
-
+  const header = ["S No.", "Party Name", "Total Debit (Selected Filter)", "Balance Credit", "Phone Number", ...Array.from({ length: BILLS_PER_ROW }).flatMap((_, i) => isCombined ? [`Bill Date ${i+1}`, `Company & Amt ${i+1}`] : [`Bill Date ${i+1}`, `Company ${i+1}`, `Bill Amt ${i+1}`])];
   const finalDataRows: any[][] = [];
   let partyCounter = 1;
   let grandTotalDebit = 0;
@@ -630,81 +532,47 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
   parties.forEach((p) => {
     const filteredBills = p.bills.filter(b => {
         if (b.billAmt <= 0) return false;
-        
         if (b.status === 'paid' || b.status === 'dispute') return false;
-
-        // Min Days filter
         if (minDays !== '' && b.days < minDays) return false;
-
-        // Company Filter
         const detectedCompany = getCompanyNameFromBillNo(b.billNo) || UNMAPPED_KEY;
-        if (companyNames.length > 0 && !companyNames.includes(detectedCompany)) {
-            return false;
-        }
+        if (companyNames.length > 0 && !companyNames.includes(detectedCompany)) return false;
         
-        // Date Range Logic
         if (dateRange && (dateRange.from || dateRange.to)) {
              const bDate = parseDate(b.billDate);
              if (bDate === 0) return false;
-
              const fromTs = getFilterTimestamp(dateRange.from);
              const toTs = getFilterTimestamp(dateRange.to);
 
+             // Single-date Selection Logic (Older or same date)
              if (dateRange.from && !dateRange.to) {
-                 // Single date: Up To logic
                  if (fromTs && bDate > fromTs) return false;
+             } else if (!dateRange.from && dateRange.to) {
+                 if (toTs && bDate > toTs) return false;
              } else {
                  if (fromTs && bDate < fromTs) return false;
                  if (toTs && bDate > toTs) return false;
              }
         }
-
         return true;
     });
     
     if (filteredBills.length === 0) return; 
-
     const companyDebitTotal = round(filteredBills.reduce((sum, b) => sum + b.billAmt, 0));
-    
-    // Accumulate Totals
     grandTotalDebit += companyDebitTotal;
     grandTotalCredit += p.balanceCredit;
-
     let isFirstRowForParty = true;
-
     for (let i = 0; i < filteredBills.length; i += BILLS_PER_ROW) {
       const billChunk = filteredBills.slice(i, i + BILLS_PER_ROW);
-
-      const baseData = isFirstRowForParty ? [
-        partyCounter++,
-        p.partyName,
-        companyDebitTotal,
-        p.balanceCredit > 0 ? -p.balanceCredit : "",
-        p.phoneNumber
-      ] : ["", "", "", "", ""];
-
+      const baseData = isFirstRowForParty ? [partyCounter++, p.partyName, companyDebitTotal, p.balanceCredit > 0 ? -p.balanceCredit : "", p.phoneNumber] : ["", "", "", "", ""];
       const billData = billChunk.flatMap(b => {
         const detectedCompany = getCompanyNameFromBillNo(b.billNo);
-        // If unmapped, show original Bill Number, otherwise show Company Name
         const companyField = detectedCompany || b.billNo || UNMAPPED_KEY;
-        
         const isAdjusted = b.billAmt < b.originalBillAmt;
         const displayAmt = isAdjusted ? `${b.billAmt} (B)` : String(b.billAmt);
-        
-        if (isCombined) {
-            // Bill Date in separate column, No column shows Company/Bill combined with Amt
-            return [b.billDate, `${companyField}   ${displayAmt}`];
-        } else {
-            // Bill Date in separate column, Bill No column shows Company/Bill
-            return [b.billDate, companyField, displayAmt];
-        }
+        return isCombined ? [b.billDate, `${companyField}   ${displayAmt}`] : [b.billDate, companyField, displayAmt];
       });
-
       const chunkDataSize = isCombined ? BILLS_PER_ROW * 2 : BILLS_PER_ROW * 3;
-      while (billData.length < chunkDataSize) {
-        billData.push("");
-      }
-
+      while (billData.length < chunkDataSize) billData.push("");
       finalDataRows.push([...baseData, ...billData]);
       isFirstRowForParty = false;
     }
@@ -715,30 +583,18 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
     return;
   }
 
-  // Append Grand Total Row
-  finalDataRows.push([
-    "", 
-    "GRAND TOTAL", 
-    grandTotalDebit > 0 ? round(grandTotalDebit) : "", 
-    grandTotalCredit > 0 ? -round(grandTotalCredit) : "", 
-    "", 
-    ...Array(isCombined ? BILLS_PER_ROW * 2 : BILLS_PER_ROW * 3).fill("")
-  ]);
-
+  finalDataRows.push(["", "GRAND TOTAL", grandTotalDebit > 0 ? round(grandTotalDebit) : "", grandTotalCredit > 0 ? -round(grandTotalCredit) : "", "", ...Array(isCombined ? BILLS_PER_ROW * 2 : BILLS_PER_ROW * 3).fill("")]);
   const wsData = [header, ...finalDataRows];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-
   const range = XLSX.utils.decode_range(ws['!ref'] || "A1");
   for (let R = 1; R <= range.e.r; ++R) {
     const isTotalRow = finalDataRows[R-1] && finalDataRows[R-1][1] === "GRAND TOTAL";
-
     for (let C = 0; C <= range.e.c; ++C) {
         const cellRef = XLSX.utils.encode_cell({c: C, r: R});
         const cell = ws[cellRef];
         if (!cell) continue;
         if (!cell.s) cell.s = {};
-        
         if (isTotalRow) {
             if (!cell.s.font) cell.s.font = {};
             cell.s.font.bold = true;
@@ -746,23 +602,14 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
         }
     }
   }
-
   const wscols = [{ wch: 8 }, { wch: 30 }, { wch: 25 }, { wch: 15 }, { wch: 15 }];
   for (let i = 0; i < BILLS_PER_ROW; i++) {
-     if (isCombined) {
-         wscols.push({ wch: 12 }); // Date
-         wscols.push({ wch: 35 }); // Company Name & Amt
-     } else {
-         wscols.push({ wch: 12 }); // Date
-         wscols.push({ wch: 25 }); // Company Name
-         wscols.push({ wch: 15 }); // Amt
-     }
+     if (isCombined) wscols.push({ wch: 12 }, { wch: 35 });
+     else wscols.push({ wch: 12 }, { wch: 25 }, { wch: 15 });
   }
   ws['!cols'] = wscols;
-
-  const fileName = `filtered_outstanding_${format}_${new Date().toISOString().split('T')[0]}.xlsx`;
   XLSX.utils.book_append_sheet(wb, ws, "Outstanding");
-  XLSX.writeFile(wb, fileName);
+  XLSX.writeFile(wb, `filtered_outstanding_${format}_${new Date().toISOString().split('T')[0]}.xlsx`);
 };
 
 export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompanies: string[] = [], dateRange?: {from: string, to: string}) => {
@@ -775,33 +622,24 @@ export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompa
       p.bills.forEach(b => {
           if (b.status === 'paid' || b.status === 'dispute') {
                const company = getCompanyNameFromBillNo(b.billNo) || UNMAPPED_KEY;
-               
-               // Apply Company Filter
                if (filterCompanies.length > 0 && !filterCompanies.includes(company)) return;
-
-               // Apply Date Range Filter if set
                if (dateRange && (dateRange.from || dateRange.to)) {
                    const bDate = parseDate(b.billDate);
                    if (bDate === 0) return;
                    const fromTs = getFilterTimestamp(dateRange.from);
                    const toTs = getFilterTimestamp(dateRange.to);
                    
+                   // Same Up To logic for single-date select
                    if (dateRange.from && !dateRange.to) {
                         if (fromTs && bDate > fromTs) return;
+                   } else if (!dateRange.from && dateRange.to) {
+                        if (toTs && bDate > toTs) return;
                    } else {
                         if (fromTs && bDate < fromTs) return;
                         if (toTs && bDate > toTs) return;
                    }
                }
-
-               allBills.push({
-                   company,
-                   partyName: p.partyName,
-                   billNo: b.billNo,
-                   billDate: b.billDate,
-                   billAmt: b.billAmt,
-                   status: b.status
-               });
+               allBills.push({ company, partyName: p.partyName, billNo: b.billNo, billDate: b.billDate, billAmt: b.billAmt, status: b.status });
           }
       });
   });
@@ -811,31 +649,18 @@ export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompa
       return;
   }
 
-  // Sort: Company -> Status -> Party
   allBills.sort((a, b) => {
       if (a.company !== b.company) return a.company.localeCompare(b.company);
       if (a.status !== b.status) return a.status.localeCompare(b.status);
       return a.partyName.localeCompare(b.partyName);
   });
 
-  allBills.forEach(item => {
-      rows.push([
-          counter++,
-          item.company,
-          item.partyName,
-          item.billNo,
-          item.billDate,
-          item.billAmt,
-          item.status.toUpperCase()
-      ]);
-  });
-
+  allBills.forEach(item => rows.push([counter++, item.company, item.partyName, item.billNo, item.billDate, item.billAmt, item.status.toUpperCase()]));
   const wsData = [header, ...rows];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   const wscols = [{ wch: 8 }, { wch: 20 }, { wch: 30 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
   ws['!cols'] = wscols;
-
   XLSX.utils.book_append_sheet(wb, ws, "Paid_Dispute_Report");
   XLSX.writeFile(wb, `paid_dispute_report_${new Date().toISOString().split('T')[0]}.xlsx`);
 };
