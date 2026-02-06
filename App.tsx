@@ -10,9 +10,9 @@ import { parseFile, downloadExcel, downloadExcelCombined, downloadExcelCompanyWi
 import { generatePaymentReminder } from './services/geminiService';
 import { syncPartyMobileNumbers, upsertPartyMobile, fetchGlobalData, saveGlobalData, clearGlobalData, fetchBillPrefixes, uploadBillPrefixes } from './services/supabaseService';
 import { ProcessedParty, BillDetail } from './types';
-import { Download, MessageSquare, Search, X, Building2, Check, CheckCircle, Trash2, ArrowLeft, ChevronDown, CalendarClock, Filter, Send, Share2, Loader2, Copy, Calendar, RefreshCw, AlertCircle, Cloud, CloudOff, Globe, Upload } from 'lucide-react';
+import { Download, MessageSquare, Search, X, Building2, Check, CheckCircle, Trash2, ArrowLeft, ChevronDown, CalendarClock, Filter, Send, Share2, Loader2, Copy, Calendar, RefreshCw, AlertCircle, Cloud, CloudOff, Globe, Upload, Puzzle } from 'lucide-react';
 
-function App() {
+export default function App() {
   const [data, setData] = useState<ProcessedParty[]>([]);
   const [lastUploadTime, setLastUploadTime] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -42,6 +42,9 @@ function App() {
   const [isHeaderDownloadMenuOpen, setIsHeaderDownloadMenuOpen] = useState(false);
   const [isPrefixMenuOpen, setIsPrefixMenuOpen] = useState(false);
 
+  // Extension Integration State
+  const [isExtensionActive, setIsExtensionActive] = useState(false);
+
   const scrollPositionRef = useRef(0);
   const filterRef = useRef<HTMLDivElement>(null);
   const dateFilterRef = useRef<HTMLDivElement>(null);
@@ -58,6 +61,31 @@ function App() {
   const removeToast = (id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
+
+  // Check for Extension Presence
+  useEffect(() => {
+    const checkExtension = () => {
+        // The content script sets this attribute on the document root
+        if (document.documentElement.getAttribute('data-yash-extension-active') === 'true') {
+            setIsExtensionActive(true);
+        }
+    };
+    
+    // Check immediately
+    checkExtension();
+    
+    // Check periodically
+    const interval = setInterval(checkExtension, 1000);
+    
+    // Listen for custom event dispatch from content script
+    const onExtensionReady = () => setIsExtensionActive(true);
+    window.addEventListener('YASH_EXTENSION_READY', onExtensionReady);
+
+    return () => {
+        clearInterval(interval);
+        window.removeEventListener('YASH_EXTENSION_READY', onExtensionReady);
+    };
+  }, []);
 
   useEffect(() => {
     const initApp = async () => {
@@ -251,8 +279,20 @@ function App() {
   const openWhatsApp = (phone: string, message: string) => {
     const cleanPhone = phone?.replace(/[^0-9]/g, '');
     if (!cleanPhone) { addToast('error', "Invalid or missing phone number"); return; }
-    const url = `https://wa.me/${cleanPhone.length === 10 ? '91'+cleanPhone : cleanPhone}?text=${encodeURIComponent(message)}`;
-    window.open(url, '_blank');
+    
+    // INTEGRATION: If extension is active, use it to automate the send process
+    if (isExtensionActive) {
+        const event = new CustomEvent('YASH_WA_SEND', { 
+            detail: { phone: cleanPhone, message: message } 
+        });
+        window.dispatchEvent(event);
+        addToast('success', 'Sending via Extension...');
+    } else {
+        // Fallback to standard web link - DIRECT WEB ACCESS
+        const phoneParam = cleanPhone.length === 10 ? '91' + cleanPhone : cleanPhone;
+        const url = `https://web.whatsapp.com/send?phone=${phoneParam}&text=${encodeURIComponent(message)}`;
+        window.open(url, '_blank');
+    }
   };
 
   const handleGenerateReminder = async (party: ProcessedParty, directSend: boolean = false) => {
@@ -312,16 +352,7 @@ function App() {
 
   const hasActiveFilters = filterCompanies.length > 0 || filterMinDays !== '' || dateRange.from || dateRange.to;
 
-  if (initialLoading) {
-      return (
-          <div className="min-h-screen bg-slate-50 flex items-center justify-center flex-col gap-4">
-              <Loader2 size={40} className="text-indigo-600 animate-spin" />
-              <p className="text-sm font-medium text-slate-500 animate-pulse">Connecting to Yash Cloud...</p>
-          </div>
-      );
-  }
-
-  const DownloadDropdown = ({ isOpen, setIsOpen, menuRef, buttonClass }: { isOpen: boolean, setIsOpen: (v: boolean) => void, menuRef: React.RefObject<HTMLDivElement>, buttonClass?: string }) => (
+  const DownloadDropdown = ({ isOpen, setIsOpen, menuRef, buttonClass }: { isOpen: boolean, setIsOpen: (v: boolean) => void, menuRef: any, buttonClass?: string }) => (
       <div className="relative" ref={menuRef}>
           <button onClick={() => setIsOpen(!isOpen)} className={buttonClass || "flex items-center gap-2 px-3 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-colors"}><Download size={16} /> Download <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} /></button>
           {isOpen && (
@@ -334,6 +365,15 @@ function App() {
       </div>
   );
 
+  if (initialLoading) {
+      return (
+          <div className="min-h-screen bg-slate-50 flex items-center justify-center flex-col gap-4">
+              <Loader2 size={40} className="text-indigo-600 animate-spin" />
+              <p className="text-sm font-medium text-slate-500 animate-pulse">Connecting to Yash Cloud...</p>
+          </div>
+      );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <ToastNotification toasts={toasts} removeToast={removeToast} />
@@ -342,8 +382,10 @@ function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3"><div className="bg-indigo-600 p-2 rounded-lg text-white shadow-sm"><Globe size={20} /></div>
             <div className="flex flex-col"><h1 className="text-lg font-bold text-slate-800 leading-tight">Yash Marketing</h1>
-                <div className="flex items-center gap-3"><div className="flex items-center gap-1">{cloudStatus === 'connected' && <Cloud size={10} className="text-emerald-500" />}{cloudStatus === 'saving' && <RefreshCw size={10} className="text-indigo-500 animate-spin" />}{cloudStatus === 'error' && <CloudOff size={10} className="text-red-500" />}
+                <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1">{cloudStatus === 'connected' && <Cloud size={10} className="text-emerald-500" />}{cloudStatus === 'saving' && <RefreshCw size={10} className="text-indigo-500 animate-spin" />}{cloudStatus === 'error' && <CloudOff size={10} className="text-red-500" />}
                         <span className={`text-[10px] font-bold uppercase tracking-wide ${cloudStatus === 'connected' ? 'text-emerald-600' : cloudStatus === 'error' ? 'text-red-500' : 'text-indigo-500'}`}>{cloudStatus === 'saving' ? 'Saving...' : cloudStatus === 'error' ? 'Offline' : 'Cloud Active'}</span></div>
+                    {isExtensionActive && (<><span className="text-slate-300">|</span><span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wide flex items-center gap-1"><Puzzle size={10} /> Ext. Active</span></>)}
                     {lastUploadTime && (<><span className="text-slate-300">|</span><span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Data: {lastUploadTime}</span></>)}</div></div></div>
           <div className="flex items-center gap-2">{selectedPartyId ? (<button onClick={handleBackToDashboard} className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"><ArrowLeft size={16} /> Back</button>) : (<>
                    <div className="relative" ref={prefixMenuRef}><button onClick={() => setIsPrefixMenuOpen(!isPrefixMenuOpen)} className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200"><Download size={16} /> Prefix Guide <ChevronDown size={14} /></button>
@@ -401,5 +443,3 @@ function App() {
     </div>
   );
 }
-
-export default App;

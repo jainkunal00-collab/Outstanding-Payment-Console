@@ -1,0 +1,29 @@
+
+{
+  "name": "Yash Payment Console & Automator",
+  "version": "2.1",
+  "description": "A comprehensive tool: WhatsApp Automation + Context Menu Balance Checker.",
+  "manifest_version": 3,
+  "permissions": ["tabs", "contextMenus", "scripting", "storage"],
+  "host_permissions": [
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open WhatsApp"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_console.js"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content_whatsapp.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
