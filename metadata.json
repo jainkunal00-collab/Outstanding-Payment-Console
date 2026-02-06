@@ -1,7 +1,5 @@
 {
   "name": "Outstanding Payment Console",
   "description": "A professional console for processing party-wise outstanding payment CSVs, visualizing debt, and generating payment reminders using AI.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
+  "requestFramePermissions": []
 }
