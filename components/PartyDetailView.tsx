@@ -62,12 +62,14 @@ const PartyDetailView: React.FC<PartyDetailViewProps> = ({ party, onBack, filter
          const bDate = parseDate(b.billDate);
          if (bDate === 0) return false; // Filter out bills with no valid date
 
-         if (dateRange.from) {
-             const fromTs = getFilterTimestamp(dateRange.from);
+         const fromTs = getFilterTimestamp(dateRange.from);
+         const toTs = getFilterTimestamp(dateRange.to);
+
+         // Special Rule: If only one date is selected (from), treat it as "Up To" date
+         if (dateRange.from && !dateRange.to) {
+             if (fromTs && bDate > fromTs) return false;
+         } else {
              if (fromTs && bDate < fromTs) return false;
-         }
-         if (dateRange.to) {
-             const toTs = getFilterTimestamp(dateRange.to);
              if (toTs && bDate > toTs) return false;
          }
       }
@@ -226,7 +228,6 @@ const PartyDetailView: React.FC<PartyDetailViewProps> = ({ party, onBack, filter
                 </div>
               </div>
             </div>
-            {/* Removed Top Debt Source Highlight section */}
           </div>
         </div>
       </div>

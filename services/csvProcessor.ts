@@ -1,11 +1,12 @@
+
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { RawCsvRow, ProcessedParty, BillDetail } from '../types';
 
 export const UNMAPPED_KEY = "D.N/TCS";
 
-// Mapping of Bill Number Prefixes to Company Names (Synchronized with provided CSV)
-const PREFIX_MAP: Record<string, string> = {
+// Initial/Fallback Mapping
+const DEFAULT_PREFIX_MAP: Record<string, string> = {
   "Al/25-26/": "GSK",
   "*HAL/25/": "GSK",
   "BSO25": "Johnson",
@@ -35,8 +36,15 @@ const PREFIX_MAP: Record<string, string> = {
   "Z/25-26/": "Delmonte"
 };
 
+// Mutable Map for Dynamic Cloud Updates
+let CURRENT_PREFIX_MAP = { ...DEFAULT_PREFIX_MAP };
+
+export const updateGlobalPrefixMap = (newMap: Record<string, string>) => {
+    CURRENT_PREFIX_MAP = { ...DEFAULT_PREFIX_MAP, ...newMap };
+};
+
 export const getUniqueCompanies = () => {
-  const mapped = Array.from(new Set(Object.values(PREFIX_MAP))).sort();
+  const mapped = Array.from(new Set(Object.values(CURRENT_PREFIX_MAP))).sort();
   // Place D.N/TCS (Unmapped) at the 1st position
   return [UNMAPPED_KEY, ...mapped];
 };
@@ -64,13 +72,13 @@ export const getCompanyNameFromBillNo = (billNo: string): string | null => {
   // 1. Try exact or near-exact matches first
   const strippedBill = upperBill.startsWith('*') ? upperBill.substring(1) : upperBill;
 
-  for (const rawPrefix in PREFIX_MAP) {
+  for (const rawPrefix in CURRENT_PREFIX_MAP) {
     const upperPrefix = rawPrefix.toUpperCase().trim();
     const strippedPrefix = upperPrefix.startsWith('*') ? upperPrefix.substring(1) : upperPrefix;
 
-    if (upperBill.startsWith(upperPrefix)) return PREFIX_MAP[rawPrefix];
-    if (upperBill.startsWith(strippedPrefix)) return PREFIX_MAP[rawPrefix];
-    if (strippedBill.startsWith(strippedPrefix)) return PREFIX_MAP[rawPrefix];
+    if (upperBill.startsWith(upperPrefix)) return CURRENT_PREFIX_MAP[rawPrefix];
+    if (upperBill.startsWith(strippedPrefix)) return CURRENT_PREFIX_MAP[rawPrefix];
+    if (strippedBill.startsWith(strippedPrefix)) return CURRENT_PREFIX_MAP[rawPrefix];
   }
 
   // 2. Fallback to "clean" match (alphanumeric only) to handle variations in slashes/dashes
@@ -78,15 +86,58 @@ export const getCompanyNameFromBillNo = (billNo: string): string | null => {
   const billClean = clean(billNo);
   
   if (billClean) {
-    for (const rawPrefix in PREFIX_MAP) {
+    for (const rawPrefix in CURRENT_PREFIX_MAP) {
       const prefixClean = clean(rawPrefix);
       if (prefixClean && billClean.startsWith(prefixClean)) {
-        return PREFIX_MAP[rawPrefix];
+        return CURRENT_PREFIX_MAP[rawPrefix];
       }
     }
   }
 
   return null;
+};
+
+// Helper to re-scan processed data after a Prefix Update
+export const reapplyPrefixes = (parties: ProcessedParty[]): ProcessedParty[] => {
+    // Since getCompanyNameFromBillNo is called dynamically in UI components,
+    // we strictly don't *need* to change the party object structure unless
+    // we were caching company names on the bill object. 
+    // Currently, company name is derived on render.
+    // We just return a shallow copy to trigger React re-render.
+    return parties.map(p => ({ ...p }));
+};
+
+export const parsePrefixFile = (file: File): Promise<Record<string, string>> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+        
+        const map: Record<string, string> = {};
+        // Expecting Row 1 to be headers, data starts from Row 2
+        // Column 0 = Prefix, Column 1 = Company Name
+        jsonData.slice(1).forEach(row => {
+            if (row[0] && row[1]) {
+                const prefix = String(row[0]).trim();
+                const company = String(row[1]).trim();
+                if (prefix && company) {
+                    map[prefix] = company;
+                }
+            }
+        });
+        resolve(map);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsArrayBuffer(file);
+  });
 };
 
 export const parseFile = (file: File): Promise<ProcessedParty[]> => {
@@ -291,13 +342,17 @@ const checkBillMatch = (b: BillDetail, filterCompanies: string[], filterMinDays:
         const bDate = parseDate(b.billDate);
         if (bDate === 0) return false;
 
-        if (dateRange.from) {
-            const fromTs = getFilterTimestamp(dateRange.from);
-            if (fromTs && bDate < fromTs) return false;
-        }
-        if (dateRange.to) {
-            const toTs = getFilterTimestamp(dateRange.to);
-            if (toTs && bDate > toTs) return false;
+        const fromTs = getFilterTimestamp(dateRange.from);
+        const toTs = getFilterTimestamp(dateRange.to);
+
+        // Special Rule: If only one date is selected (from), treat it as "Up To" date (show older bills)
+        if (dateRange.from && !dateRange.to) {
+             // Only From selected -> Show Bills <= From (Up To logic)
+             if (fromTs && bDate > fromTs) return false;
+        } else {
+             // Standard Range: From <= Bill <= To
+             if (fromTs && bDate < fromTs) return false;
+             if (toTs && bDate > toTs) return false;
         }
     }
 
@@ -576,12 +631,6 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
     const filteredBills = p.bills.filter(b => {
         if (b.billAmt <= 0) return false;
         
-        // Pass to central checker but exclude paid status check logic if needed? 
-        // checkBillMatch handles active filters.
-        
-        // However, checkBillMatch assumes we want to filter OUT paid bills.
-        // This function is for company wide export, which usually shows active debt.
-        
         if (b.status === 'paid' || b.status === 'dispute') return false;
 
         // Min Days filter
@@ -593,18 +642,20 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
             return false;
         }
         
-        // Date Range
+        // Date Range Logic
         if (dateRange && (dateRange.from || dateRange.to)) {
              const bDate = parseDate(b.billDate);
              if (bDate === 0) return false;
 
-             if (dateRange.from) {
-                const fromTs = getFilterTimestamp(dateRange.from);
-                if (fromTs && bDate < fromTs) return false;
-             }
-             if (dateRange.to) {
-                const toTs = getFilterTimestamp(dateRange.to);
-                if (toTs && bDate > toTs) return false;
+             const fromTs = getFilterTimestamp(dateRange.from);
+             const toTs = getFilterTimestamp(dateRange.to);
+
+             if (dateRange.from && !dateRange.to) {
+                 // Single date: Up To logic
+                 if (fromTs && bDate > fromTs) return false;
+             } else {
+                 if (fromTs && bDate < fromTs) return false;
+                 if (toTs && bDate > toTs) return false;
              }
         }
 
@@ -714,9 +765,84 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
   XLSX.writeFile(wb, fileName);
 };
 
+export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompanies: string[] = [], dateRange?: {from: string, to: string}) => {
+  const header = ["S No.", "Company", "Party Name", "Bill No", "Bill Date", "Bill Amt", "Status"];
+  const rows: any[][] = [];
+  let counter = 1;
+  const allBills: any[] = [];
+
+  parties.forEach(p => {
+      p.bills.forEach(b => {
+          if (b.status === 'paid' || b.status === 'dispute') {
+               const company = getCompanyNameFromBillNo(b.billNo) || UNMAPPED_KEY;
+               
+               // Apply Company Filter
+               if (filterCompanies.length > 0 && !filterCompanies.includes(company)) return;
+
+               // Apply Date Range Filter if set
+               if (dateRange && (dateRange.from || dateRange.to)) {
+                   const bDate = parseDate(b.billDate);
+                   if (bDate === 0) return;
+                   const fromTs = getFilterTimestamp(dateRange.from);
+                   const toTs = getFilterTimestamp(dateRange.to);
+                   
+                   if (dateRange.from && !dateRange.to) {
+                        if (fromTs && bDate > fromTs) return;
+                   } else {
+                        if (fromTs && bDate < fromTs) return;
+                        if (toTs && bDate > toTs) return;
+                   }
+               }
+
+               allBills.push({
+                   company,
+                   partyName: p.partyName,
+                   billNo: b.billNo,
+                   billDate: b.billDate,
+                   billAmt: b.billAmt,
+                   status: b.status
+               });
+          }
+      });
+  });
+
+  if (allBills.length === 0) {
+      alert("No Paid or Disputed bills found matching the current filters.");
+      return;
+  }
+
+  // Sort: Company -> Status -> Party
+  allBills.sort((a, b) => {
+      if (a.company !== b.company) return a.company.localeCompare(b.company);
+      if (a.status !== b.status) return a.status.localeCompare(b.status);
+      return a.partyName.localeCompare(b.partyName);
+  });
+
+  allBills.forEach(item => {
+      rows.push([
+          counter++,
+          item.company,
+          item.partyName,
+          item.billNo,
+          item.billDate,
+          item.billAmt,
+          item.status.toUpperCase()
+      ]);
+  });
+
+  const wsData = [header, ...rows];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const wscols = [{ wch: 8 }, { wch: 20 }, { wch: 30 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
+  ws['!cols'] = wscols;
+
+  XLSX.utils.book_append_sheet(wb, ws, "Paid_Dispute_Report");
+  XLSX.writeFile(wb, `paid_dispute_report_${new Date().toISOString().split('T')[0]}.xlsx`);
+};
+
 export const downloadPrefixMap = () => {
   const header = ["Bill Number Prefix", "Company Name"];
-  const data = Object.entries(PREFIX_MAP).map(([prefix, company]) => [prefix, company]);
+  const data = Object.entries(CURRENT_PREFIX_MAP).map(([prefix, company]) => [prefix, company]);
   const wsData = [header, ...data];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
