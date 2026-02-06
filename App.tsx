@@ -260,9 +260,75 @@ export default function App() {
     const newData = data.map(p => {
         if (p.id !== partyId) return p;
         const updatedBills = p.bills.map(b => b.billNo === billNo ? { ...b, status: newStatus } : b);
-        return { ...p, bills: updatedBills };
+        
+        // Also recalc debit if unmarking paid/dispute
+        const newDebit = updatedBills.reduce((sum, b) => b.status !== 'paid' && b.status !== 'dispute' ? sum + b.billAmt : sum, 0);
+        
+        return { ...p, bills: updatedBills, balanceDebit: newDebit, rawBalance: newDebit - p.balanceCredit };
     });
     setData(newData);
+    saveGlobalData(newData); // Auto-save status changes
+  };
+  
+  const handlePartialPayment = (partyId: string, billNo: string, amountReceived: number) => {
+    const newData = data.map(p => {
+        if (p.id !== partyId) return p;
+        const updatedBills = p.bills.map(b => {
+            if (b.billNo !== billNo) return b;
+            
+            // Logic: Deduct amount. If remaining is <= 0, mark paid.
+            const remaining = b.billAmt - amountReceived;
+            const currentManual = b.manualAdjustment || 0;
+            const newManual = currentManual + amountReceived;
+
+            if (remaining <= 0) {
+                // Fully Paid
+                return { ...b, billAmt: 0, status: 'paid' as const, manualAdjustment: newManual };
+            } else {
+                // Partially Paid - update amount, keep status active (undefined or 'unpaid')
+                return { ...b, billAmt: remaining, status: 'unpaid' as const, manualAdjustment: newManual };
+            }
+        });
+
+        // Recalculate Total Debit for the Party
+        const newDebit = updatedBills.reduce((sum, b) => b.status !== 'paid' && b.status !== 'dispute' ? sum + b.billAmt : sum, 0);
+        
+        return { ...p, bills: updatedBills, balanceDebit: newDebit, rawBalance: newDebit - p.balanceCredit };
+    });
+    
+    setData(newData);
+    saveGlobalData(newData);
+    addToast('success', `Payment of ₹${amountReceived} recorded.`);
+  };
+
+  const handleUndoPartialPayment = (partyId: string, billNo: string) => {
+    const newData = data.map(p => {
+        if (p.id !== partyId) return p;
+        const updatedBills = p.bills.map(b => {
+            if (b.billNo !== billNo) return b;
+            
+            const adjustmentToRevert = b.manualAdjustment || 0;
+            if (adjustmentToRevert === 0) return b;
+
+            const newBillAmt = b.billAmt + adjustmentToRevert;
+            // If reverting makes bill outstanding again, default to unpaid
+            const newStatus = newBillAmt > 0 ? 'unpaid' : 'paid';
+
+            return { 
+                ...b, 
+                billAmt: newBillAmt, 
+                status: newStatus as any, 
+                manualAdjustment: 0 
+            };
+        });
+
+        const newDebit = updatedBills.reduce((sum, b) => b.status !== 'paid' && b.status !== 'dispute' ? sum + b.billAmt : sum, 0);
+        return { ...p, bills: updatedBills, balanceDebit: newDebit, rawBalance: newDebit - p.balanceCredit };
+    });
+    
+    setData(newData);
+    saveGlobalData(newData);
+    addToast('info', 'Partial payment reverted.');
   };
 
   const toggleSelectAll = () => {
@@ -396,7 +462,20 @@ export default function App() {
                           <button onClick={handleClear} className={`flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors border ml-2 cursor-pointer ${confirmClear ? 'bg-red-600 text-white border-red-700 hover:bg-red-700 shadow-md' : 'text-red-600 bg-red-50 hover:bg-red-100 border-red-100'}`}><Trash2 size={16} /> {confirmClear ? 'Confirm Delete?' : 'Delete'}</button></>)}</>)}</div></div></header>
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {data.length === 0 ? (<div className="flex flex-col items-center justify-center min-h-[60vh] animate-fade-in"><div className="text-center mb-8"><h2 className="text-3xl font-bold text-slate-900 mb-2">Cloud Payment Console</h2><p className="text-slate-500 max-w-md mx-auto">Upload your Excel/CSV here. It will be synced to the cloud and accessible from any device.</p></div><FileUpload key={uploadKey} onFileSelect={handleFileSelect} />{loading && <p className="mt-4 text-indigo-600 animate-pulse font-medium text-sm">Processing & Syncing to Cloud...</p>}</div>) : selectedPartyId && selectedParty ? (<PartyDetailView party={selectedParty} onBack={handleBackToDashboard} filterCompanies={filterCompanies} filterMinDays={filterMinDays} dateRange={dateRange} onSendWhatsApp={(msg) => openWhatsApp(selectedParty.phoneNumber, msg)} onStatusChange={handleBillStatusChange} onGenerateReminder={() => handleGenerateReminder(selectedParty, false)} />) : (<div className="animate-fade-in relative"><DashboardStats data={data} /><div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-20">
+        {data.length === 0 ? (<div className="flex flex-col items-center justify-center min-h-[60vh] animate-fade-in"><div className="text-center mb-8"><h2 className="text-3xl font-bold text-slate-900 mb-2">Cloud Payment Console</h2><p className="text-slate-500 max-w-md mx-auto">Upload your Excel/CSV here. It will be synced to the cloud and accessible from any device.</p></div><FileUpload key={uploadKey} onFileSelect={handleFileSelect} />{loading && <p className="mt-4 text-indigo-600 animate-pulse font-medium text-sm">Processing & Syncing to Cloud...</p>}</div>) : selectedPartyId && selectedParty ? (
+            <PartyDetailView 
+                party={selectedParty} 
+                onBack={handleBackToDashboard} 
+                filterCompanies={filterCompanies} 
+                filterMinDays={filterMinDays} 
+                dateRange={dateRange} 
+                onSendWhatsApp={(msg) => openWhatsApp(selectedParty.phoneNumber, msg)} 
+                onStatusChange={handleBillStatusChange}
+                onPartialPayment={handlePartialPayment}
+                onUndoPartialPayment={handleUndoPartialPayment}
+                onGenerateReminder={() => handleGenerateReminder(selectedParty, false)} 
+            />
+        ) : (<div className="animate-fade-in relative"><DashboardStats data={data} /><div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-20">
                     <div className="p-4 border-b border-slate-200 flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-white sticky left-0"><h3 className="text-lg font-bold text-slate-800">Payment Management</h3><div className="flex flex-wrap items-center gap-2"><DownloadDropdown isOpen={isDownloadMenuOpen} setIsOpen={setIsDownloadMenuOpen} menuRef={downloadMenuRef} />
                             <div className="relative" ref={filterRef}><button onClick={() => setIsFilterDropdownOpen(!isFilterDropdownOpen)} className={`flex items-center gap-2 px-3 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-800 transition-colors font-medium border-none outline-none ${filterCompanies.length > 0 ? 'ring-2 ring-indigo-500' : ''}`}><Filter size={16} /><span>{filterCompanies.length === 0 ? 'All Companies' : `${filterCompanies.length} Selected`}</span><ChevronDown size={14} className={`transition-transform ${isFilterDropdownOpen ? 'rotate-180' : ''}`} /></button>
                                 {isFilterDropdownOpen && (<div className="absolute left-0 mt-2 w-64 bg-white border border-slate-200 rounded-xl shadow-xl z-50 overflow-hidden animate-fade-in"><div className="p-3 border-b border-slate-100 flex justify-between items-center bg-slate-50"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Filters</span><button onClick={() => setFilterCompanies([])} className="text-[10px] text-indigo-600 font-black uppercase hover:underline">Reset</button></div>

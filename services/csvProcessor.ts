@@ -613,23 +613,28 @@ export const downloadExcelCompanyWide = (parties: ProcessedParty[], companyNames
 };
 
 export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompanies: string[] = [], dateRange?: {from: string, to: string}) => {
-  const header = ["S No.", "Company", "Party Name", "Bill No", "Bill Date", "Bill Amt", "Status"];
+  const header = ["S No.", "Company", "Party Name", "Bill No", "Bill Date", "Amount", "Status"];
   const rows: any[][] = [];
   let counter = 1;
   const allBills: any[] = [];
 
   parties.forEach(p => {
       p.bills.forEach(b => {
-          if (b.status === 'paid' || b.status === 'dispute') {
+          const manualAdj = b.manualAdjustment || 0;
+          const isPaid = b.status === 'paid';
+          const isDispute = b.status === 'dispute';
+          const hasAdjustment = manualAdj > 0;
+
+          if (isPaid || isDispute || hasAdjustment) {
                const company = getCompanyNameFromBillNo(b.billNo) || UNMAPPED_KEY;
                if (filterCompanies.length > 0 && !filterCompanies.includes(company)) return;
+               
                if (dateRange && (dateRange.from || dateRange.to)) {
                    const bDate = parseDate(b.billDate);
                    if (bDate === 0) return;
                    const fromTs = getFilterTimestamp(dateRange.from);
                    const toTs = getFilterTimestamp(dateRange.to);
                    
-                   // Same Up To logic for single-date select
                    if (dateRange.from && !dateRange.to) {
                         if (fromTs && bDate > fromTs) return;
                    } else if (!dateRange.from && dateRange.to) {
@@ -639,13 +644,31 @@ export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompa
                         if (toTs && bDate > toTs) return;
                    }
                }
-               allBills.push({ company, partyName: p.partyName, billNo: b.billNo, billDate: b.billDate, billAmt: b.billAmt, status: b.status });
+
+               let finalAmt = b.billAmt;
+               let finalStatus = (b.status || '').toUpperCase();
+
+               if (hasAdjustment) {
+                   // If there is a manual adjustment, show the "adjusted amount" (amount paid)
+                   finalAmt = manualAdj;
+                   
+                   if (!isPaid && !isDispute) {
+                       finalStatus = 'PARTIALLY ADJUSTED';
+                   }
+                   // If isPaid is true, it stays 'PAID', but we show the total adjusted amount
+               } else {
+                   // Standard case
+                   finalStatus = isDispute ? 'DISPUTE' : 'PAID';
+                   finalAmt = b.billAmt;
+               }
+
+               allBills.push({ company, partyName: p.partyName, billNo: b.billNo, billDate: b.billDate, billAmt: finalAmt, status: finalStatus });
           }
       });
   });
 
   if (allBills.length === 0) {
-      alert("No Paid or Disputed bills found matching the current filters.");
+      alert("No Paid, Disputed, or Adjusted bills found matching the current filters.");
       return;
   }
 
@@ -655,11 +678,11 @@ export const downloadPaidDisputeReport = (parties: ProcessedParty[], filterCompa
       return a.partyName.localeCompare(b.partyName);
   });
 
-  allBills.forEach(item => rows.push([counter++, item.company, item.partyName, item.billNo, item.billDate, item.billAmt, item.status.toUpperCase()]));
+  allBills.forEach(item => rows.push([counter++, item.company, item.partyName, item.billNo, item.billDate, item.billAmt, item.status]));
   const wsData = [header, ...rows];
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  const wscols = [{ wch: 8 }, { wch: 20 }, { wch: 30 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
+  const wscols = [{ wch: 8 }, { wch: 20 }, { wch: 30 }, { wch: 20 }, { wch: 15 }, { wch: 15 }, { wch: 20 }];
   ws['!cols'] = wscols;
   XLSX.utils.book_append_sheet(wb, ws, "Paid_Dispute_Report");
   XLSX.writeFile(wb, `paid_dispute_report_${new Date().toISOString().split('T')[0]}.xlsx`);

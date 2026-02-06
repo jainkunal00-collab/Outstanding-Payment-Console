@@ -21,6 +21,7 @@ export interface BillDetail {
   dueDate: string;
   days: number;
   status?: 'paid' | 'dispute' | 'unpaid'; // Session-based status
+  manualAdjustment?: number; // Tracks partial payments made in the console
 }
 
 export interface ProcessedParty {
