@@ -90,16 +90,30 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             ]);
 
             const prefixMap = { ...DEFAULT_PREFIX_MAP, ...dynamicPrefixes };
-            const match = findParty(parties, query);
-            
-            // Determine if query was a phone number for fallback logic (Master list check)
-            // We strip everything except digits to check if there is a valid phone number segment
             const digitsOnly = query.replace(/[^0-9]/g, '');
             const hasSignificantDigits = digitsOnly.length > 5;
 
+            // STRATEGY:
+            // 1. Try to find party directly in Console Data (by Name or Phone stored in Console Data)
+            let match = findParty(parties, query);
+            let masterName = null;
+            
+            // 2. If not found locally, and query is a phone number, try Reverse Lookup via Master List (Supabase)
+            if (!match && hasSignificantDigits) {
+                masterName = await fetchPartyNameFromMaster(digitsOnly);
+                
+                // 3. If we found a name in Master List, try to find THAT NAME in our Console Data
+                if (masterName) {
+                    const matchedByName = findParty(parties, masterName);
+                    if (matchedByName) {
+                        match = matchedByName;
+                    }
+                }
+            }
+
             let message = "";
             if (match) {
-                // FOUND IN CONSOLE DATA: Show full details regardless of search type (Name or Phone)
+                // FOUND IN CONSOLE DATA (Either directly or via reverse phone lookup)
                 const debit = formatCurrency(match.balanceDebit || 0);
                 message = `✅ PARTY FOUND\n\nName: ${match.partyName}\nTotal Outstanding: ${debit}`;
                 
@@ -107,8 +121,21 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
                     message += `\nCredit Balance: ${formatCurrency(match.balanceCredit)}`;
                 }
                 
+                // Display the phone number from the record
                 if (match.phoneNumber) {
                     message += `\nPhone: ${match.phoneNumber}`;
+                    
+                    // IF we searched by a phone number (digits), and the found record's phone is DIFFERENT,
+                    // show the detected number to reassure the user why this record was picked.
+                    if (hasSignificantDigits) {
+                        const recPhone = match.phoneNumber.replace(/[^0-9]/g, '');
+                        // Check if the searched digits are missing from the record phone
+                        if (!recPhone.includes(digitsOnly) && !digitsOnly.includes(recPhone)) {
+                            message += `\n(Matched via detected no: ${query})`;
+                        }
+                    }
+                } else if (hasSignificantDigits) {
+                     message += `\n(Matched via detected no: ${query})`;
                 }
                 
                 const pendingBills = (match.bills || []).filter(b => b.billAmt > 0 && b.status !== 'paid');
@@ -135,12 +162,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
                 }
                 
             } else {
-                // FALLBACK: If not found in console data, check Master Contact List (Supabase 'parties' table)
-                let masterName = null;
-                if (hasSignificantDigits) {
-                    masterName = await fetchPartyNameFromMaster(digitsOnly);
-                }
-
+                // FALLBACK: Not in console data
+                
                 if (masterName) {
                     // FOUND IN MASTER LIST ONLY: Show Name Only
                     message = `✅ PARTY FOUND (Master List)\n\nName: ${masterName}\n\n(No outstanding balance in current console data)`;
@@ -255,36 +278,61 @@ async function fetchPartyNameFromMaster(phoneRaw) {
     return null;
 }
 
+// Improved findParty with Scoring System
+// Prevents partial name matches (e.g. "Abhay" matching "Abhay Trading") from shadowing exact matches
 function findParty(parties, query) {
     if (!parties || !query) return undefined;
 
     const cleanQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
     const digitsOnly = query.replace(/[^0-9]/g, '');
-    
-    return parties.find(p => {
-        if (!p) return false;
+    const isQueryPhone = digitsOnly.length >= 5;
+
+    let bestMatch = undefined;
+    let maxScore = -1;
+
+    parties.forEach(p => {
+        if (!p) return;
 
         const pName = (p.partyName || "").toLowerCase().replace(/[^a-z0-9]/g, '');
         const pPhone = (p.phoneNumber || "").replace(/[^0-9]/g, '');
 
-        // 1. Name Match: Check if one string is included in the other
-        // This handles cases where selection is "Party Name Phone" (cleanQuery includes pName)
-        // or where selection is "Party" (pName includes cleanQuery)
-        if (pName.length >= 3 && (pName.includes(cleanQuery) || cleanQuery.includes(pName))) {
-            return true;
+        let score = 0;
+        let matched = false;
+
+        // 1. Phone Match
+        if (isQueryPhone) {
+            // Exact or contained phone match
+            if (pPhone && (pPhone === digitsOnly || pPhone.includes(digitsOnly) || digitsOnly.includes(pPhone))) {
+                score = 100; // High priority for direct phone match
+                matched = true;
+            }
         }
 
-        // 2. Phone Match: Check if the digits in the selection match the party phone
-        if (digitsOnly.length >= 5) {
-            // Check if party phone exists in the selection (e.g. selection="Name 9812345678")
-            if (pPhone && digitsOnly.includes(pPhone)) return true;
-            
-            // Check if selection digits match part of party phone (e.g. selection="812345678")
-            if (pPhone && pPhone.includes(digitsOnly)) return true;
+        // 2. Name Match
+        if (!matched) {
+             if (pName === cleanQuery) {
+                 score = 90; // Exact Name
+                 matched = true;
+             } else if (pName.length >= 3 && pName.includes(cleanQuery)) {
+                 // Party "Abhay Trading" includes Query "Abhay" -> Good match
+                 score = 60;
+                 matched = true;
+             } else if (cleanQuery.length >= 3 && pName.length >= 3 && cleanQuery.includes(pName)) {
+                 // Query "Abhay Trading" includes Party "Abhay" -> Weak match
+                 score = 50;
+                 matched = true;
+             }
         }
-
-        return false;
+        
+        if (matched) {
+             if (score > maxScore) {
+                 maxScore = score;
+                 bestMatch = p;
+             }
+        }
     });
+
+    return bestMatch;
 }
 
 function getCompanyName(billNo, map) {
