@@ -172,12 +172,43 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
                 }
             }
 
-            // Inject the alert into the page
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: (msg) => alert(msg),
-                args: [message]
-            }).catch(err => console.error("Script Injection Error:", err));
+            // --- SMART INJECTION LOGIC ---
+            
+            // Helper: Fallback to opening a new tab if injection fails
+            const openFallbackTab = () => {
+                 const dataUrl = `data:text/plain;charset=utf-8,${encodeURIComponent(message)}`;
+                 chrome.tabs.create({ url: dataUrl });
+            };
+
+            // Helper: Try to inject the alert
+            const attemptInjection = () => {
+                chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: (msg) => alert(msg),
+                    args: [message]
+                }).catch(err => {
+                    console.warn("Script Injection Failed (restricted host). Falling back to Tab.", err);
+                    openFallbackTab();
+                });
+            };
+
+            // Check if we are on a file:// URL (PDFs, local files)
+            // This prevents the error "Cannot access contents of url" by skipping injection if permission is missing
+            if (tab.url && tab.url.startsWith('file://')) {
+                chrome.extension.isAllowedFileSchemeAccess((isAllowed) => {
+                    if (isAllowed) {
+                        attemptInjection();
+                    } else {
+                        // User has NOT enabled "Allow access to file URLs"
+                        // Skip injection to avoid error log, go straight to fallback
+                        console.log("File access not enabled. Using fallback tab.");
+                        openFallbackTab();
+                    }
+                });
+            } else {
+                // Standard web page
+                attemptInjection();
+            }
 
         } catch (err) {
             console.error("Processing Error:", err);
